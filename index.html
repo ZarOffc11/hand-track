@@ -213,6 +213,11 @@
         <div class="metric-value" id="handedness" style="font-size:16px;">–</div>
       </div>
       <div class="divider"></div>
+      <div>
+        <div class="metric-label">Gesture</div>
+        <div class="metric-value" id="gesture" style="font-size:15px; min-height:1.2em;">–</div>
+      </div>
+      <div class="divider"></div>
       <div style="flex:1;">
         <div class="metric-label">Ujung jari (x, y)</div>
         <div class="joints" id="joints">
@@ -226,7 +231,7 @@
     </div>
   </main>
 
-  <footer>21 titik per tangan · diproses lokal di perangkatmu, tidak ada video yang dikirim ke server</footer>
+  <footer>Gesture: telapak ke atas · pinch · kepal · peace ✌️ — diproses lokal, tidak ada video terkirim ke server</footer>
 </div>
 
 <script type="module">
@@ -260,8 +265,227 @@ let lastTime = performance.now();
 let frames = 0;
 let handLandmarker = null;
 let running = false;
+const gestureEl = document.getElementById('gesture');
 
-function drawResults(result) {
+// ===================== GESTURE ENGINE =====================
+// Semua perhitungan geometri pakai worldLandmarks (koordinat 3D nyata dalam
+// meter, origin di pusat tangan) supaya threshold jarak/sudut konsisten
+// tidak peduli seberapa dekat/jauh tangan dari kamera.
+
+function dist3(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+function sub3(a, b) { return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }; }
+function cross3(a, b) {
+  return { x: a.y*b.z - a.z*b.y, y: a.z*b.x - a.x*b.z, z: a.x*b.y - a.y*b.x };
+}
+function norm3(v) {
+  const m = Math.hypot(v.x, v.y, v.z) || 1;
+  return { x: v.x/m, y: v.y/m, z: v.z/m };
+}
+
+// tip lebih jauh dari pergelangan dibanding sendi PIP = jari lurus
+function fingerExtended(wl, tip, pip) {
+  return dist3(wl[tip], wl[0]) > dist3(wl[pip], wl[0]) * 1.05;
+}
+
+function classifyPose(wl) {
+  const idxExt = fingerExtended(wl, 8, 6);
+  const midExt = fingerExtended(wl, 12, 10);
+  const ringExt = fingerExtended(wl, 16, 14);
+  const pinkyExt = fingerExtended(wl, 20, 18);
+  const thumbExt = dist3(wl[4], wl[17]) > dist3(wl[2], wl[17]) * 0.9;
+
+  const extendedCount = [idxExt, midExt, ringExt, pinkyExt].filter(Boolean).length;
+
+  // normal bidang telapak tangan
+  const v1 = sub3(wl[5], wl[0]);
+  const v2 = sub3(wl[17], wl[0]);
+  const n = norm3(cross3(v1, v2));
+
+  const camScore = Math.abs(n.z);   // besar = telapak datar menghadap/membelakangi kamera
+  const upScore = Math.abs(n.y);    // besar = telapak datar menghadap atas/bawah
+
+  const pinchDist = dist3(wl[4], wl[8]);
+  const handSpan = dist3(wl[0], wl[9]) || 0.08; // skala tangan buat normalisasi pinch
+
+  return {
+    isFist: extendedCount === 0 && !thumbExt,
+    isPeace: idxExt && midExt && !ringExt && !pinkyExt,
+    isFlatOpen: extendedCount >= 3,
+    camScore, upScore,
+    pinchAmt: pinchDist / handSpan, // kecil = nempel (pinch)
+    palmCenter: wl[9]
+  };
+}
+
+// ---- state animasi (di-lerp tiap frame biar transisinya halus) ----
+const gfx = {
+  pinch: 0,        // 0..1 progres hitam-putih & blur
+  diamond: 0,       // 0..1 opacity/scale diamond
+  diamondAngle: 0,
+  fistCooldown: 0,
+  peaceCooldown: 0,
+  rings: [],        // shockwave dari kepalan tangan
+  confetti: [],      // partikel dari peace sign
+};
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function updateGesture(landmarks, worldLandmarks, dt) {
+  let label = '–';
+
+  if (landmarks && worldLandmarks) {
+    const pose = classifyPose(worldLandmarks);
+
+    const wantPinch = pose.pinchAmt < 0.35 ? 1 : 0;
+    gfx.pinch = lerp(gfx.pinch, wantPinch, 0.08);
+
+    const isPalmUp = pose.isFlatOpen && pose.upScore > pose.camScore && pose.upScore > 0.55;
+    gfx.diamond = lerp(gfx.diamond, isPalmUp ? 1 : 0, 0.06);
+    gfx.diamondAngle += dt * 0.0012;
+
+    gfx.fistCooldown = Math.max(0, gfx.fistCooldown - dt);
+    gfx.peaceCooldown = Math.max(0, gfx.peaceCooldown - dt);
+
+    if (pose.isFist && gfx.fistCooldown === 0) {
+      const p = landmarks[9];
+      gfx.rings.push({ x: p.x, y: p.y, t: 0 });
+      gfx.fistCooldown = 700;
+    }
+    if (pose.isPeace && gfx.peaceCooldown === 0) {
+      spawnConfetti(landmarks[9]);
+      gfx.peaceCooldown = 900;
+    }
+
+    if (gfx.pinch > 0.5) label = 'Pinch — memudar…';
+    else if (isPalmUp) label = 'Telapak ke atas ✦';
+    else if (pose.isFist) label = 'Mengepal ✊';
+    else if (pose.isPeace) label = 'Peace ✌️';
+    else if (pose.isFlatOpen) label = 'Terbuka';
+    else label = 'Netral';
+  } else {
+    gfx.pinch = lerp(gfx.pinch, 0, 0.08);
+    gfx.diamond = lerp(gfx.diamond, 0, 0.06);
+  }
+
+  gestureEl.textContent = label;
+  canvas.style.filter = gfx.pinch > 0.01
+    ? `grayscale(${gfx.pinch}) blur(${(gfx.pinch * 6).toFixed(1)}px) brightness(${1 - gfx.pinch*0.15})`
+    : 'none';
+}
+
+function spawnConfetti(originNorm) {
+  const cx = originNorm.x * canvas.width;
+  const cy = originNorm.y * canvas.height;
+  const colors = ['#c6ff5e', '#e9ede8', '#7d9c4a', '#ffffff'];
+  for (let i = 0; i < 28; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const spd = 2 + Math.random() * 5;
+    gfx.confetti.push({
+      x: cx, y: cy,
+      vx: Math.cos(ang) * spd,
+      vy: Math.sin(ang) * spd - 2,
+      life: 1,
+      size: 2 + Math.random() * 3,
+      color: colors[i % colors.length]
+    });
+  }
+}
+
+function drawDiamond(landmarks) {
+  if (gfx.diamond < 0.01 || !landmarks) return;
+  const wrist = landmarks[0], midMcp = landmarks[9];
+  const cx = midMcp.x * canvas.width;
+  const cy = midMcp.y * canvas.height - 70 * gfx.diamond;
+  const scale = gfx.diamond;
+  const size = 26 * scale;
+
+  ctx.save();
+  ctx.translate(cx, cy + Math.sin(gfx.diamondAngle * 3) * 6 * scale);
+  ctx.rotate(Math.sin(gfx.diamondAngle) * 0.15);
+  ctx.globalAlpha = gfx.diamond;
+  ctx.shadowColor = '#c6ff5e';
+  ctx.shadowBlur = 24 * scale;
+
+  ctx.beginPath();
+  ctx.moveTo(0, -size);
+  ctx.lineTo(size * 0.75, -size * 0.15);
+  ctx.lineTo(0, size);
+  ctx.lineTo(-size * 0.75, -size * 0.15);
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(0, -size, 0, size);
+  grad.addColorStop(0, '#e9ffcf');
+  grad.addColorStop(1, '#c6ff5e');
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(-size * 0.75, -size * 0.15);
+  ctx.lineTo(size * 0.75, -size * 0.15);
+  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+  ctx.stroke();
+
+  ctx.restore();
+
+  // sparkle kecil di sekitar diamond
+  const sparkleCount = 3;
+  for (let i = 0; i < sparkleCount; i++) {
+    const a = gfx.diamondAngle * 2 + (i / sparkleCount) * Math.PI * 2;
+    const r = 34 * scale;
+    const sx = cx + Math.cos(a) * r;
+    const sy = cy + Math.sin(a) * r * 0.6;
+    ctx.save();
+    ctx.globalAlpha = gfx.diamond * (0.4 + 0.6 * Math.abs(Math.sin(gfx.diamondAngle * 4 + i)));
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(sx, sy, 1.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawRings(dt) {
+  for (let i = gfx.rings.length - 1; i >= 0; i--) {
+    const r = gfx.rings[i];
+    r.t += dt;
+    const p = r.t / 600; // durasi 600ms
+    if (p >= 1) { gfx.rings.splice(i, 1); continue; }
+    const cx = r.x * canvas.width, cy = r.y * canvas.height;
+    ctx.save();
+    ctx.globalAlpha = 1 - p;
+    ctx.strokeStyle = '#c6ff5e';
+    ctx.lineWidth = 3 * (1 - p) + 1;
+    ctx.beginPath();
+    ctx.arc(cx, cy, p * 140, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawConfetti(dt) {
+  const step = dt / 16.7;
+  for (let i = gfx.confetti.length - 1; i >= 0; i--) {
+    const c = gfx.confetti[i];
+    c.x += c.vx * step;
+    c.y += c.vy * step;
+    c.vy += 0.15 * step;
+    c.life -= 0.018 * step;
+    if (c.life <= 0) { gfx.confetti.splice(i, 1); continue; }
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, c.life);
+    ctx.fillStyle = c.color;
+    ctx.fillRect(c.x - c.size/2, c.y - c.size/2, c.size, c.size);
+    ctx.restore();
+  }
+}
+// ===================== END GESTURE ENGINE =====================
+
+function drawResults(result, dt) {
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
   ctx.save();
@@ -269,7 +493,13 @@ function drawResults(result) {
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
   const landmarksList = result.landmarks || [];
+  const worldList = result.worldLandmarks || [];
   handCountEl.textContent = landmarksList.length;
+
+  updateGesture(landmarksList[0], worldList[0], dt);
+  drawDiamond(landmarksList[0]);
+  drawRings(dt);
+  drawConfetti(dt);
 
   if (landmarksList.length > 0) {
     const sides = (result.handednesses || []).map(h => h[0].categoryName === 'Left' ? 'Kanan' : 'Kiri');
@@ -317,11 +547,16 @@ function drawResults(result) {
   ctx.restore();
 }
 
+let lastFrameTs = performance.now();
+
 function renderLoop() {
   if (!running) return;
+  const now = performance.now();
+  const dt = now - lastFrameTs;
+  lastFrameTs = now;
   if (video.readyState >= 2) {
-    const result = handLandmarker.detectForVideo(video, performance.now());
-    drawResults(result);
+    const result = handLandmarker.detectForVideo(video, now);
+    drawResults(result, dt);
   }
   requestAnimationFrame(renderLoop);
 }
