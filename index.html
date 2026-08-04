@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hand Tracker</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mediapipe/hands/hands.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mediapipe/camera_utils/camera_utils.js"></script>
+<style>
+  @font-face {
+    font-family: 'JetBrains Mono';
+    src: local('JetBrains Mono');
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0b0d0c;
+    --panel: #131615;
+    --line: #232826;
+    --lime: #c6ff5e;
+    --lime-dim: #7d9c4a;
+    --text: #e9ede8;
+    --text-dim: #7d8880;
+  }
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+    overflow: hidden;
+  }
+  .app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    width: 100vw;
+  }
+  header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--line);
+    flex-shrink: 0;
+  }
+  .brand {
+    font-size: 13px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text);
+  }
+  .brand span { color: var(--lime); }
+  .status {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    transition: background 0.2s;
+  }
+  .dot.live { background: var(--lime); box-shadow: 0 0 8px var(--lime); }
+
+  main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 220px;
+    min-height: 0;
+  }
+  .stage {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+    overflow: hidden;
+  }
+  .stage video, .stage canvas {
+    position: absolute;
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
+  }
+  .stage video { visibility: hidden; }
+
+  .stage-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 16px;
+    z-index: 5;
+  }
+  .stage-empty p {
+    color: var(--text-dim);
+    font-size: 12px;
+    letter-spacing: 0.05em;
+    text-align: center;
+    max-width: 260px;
+    line-height: 1.6;
+  }
+  button#start {
+    background: var(--lime);
+    color: #0b0d0c;
+    border: none;
+    padding: 12px 28px;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    cursor: pointer;
+    border-radius: 2px;
+    transition: transform 0.1s ease;
+  }
+  button#start:hover { transform: scale(1.03); }
+  button#start:active { transform: scale(0.98); }
+
+  .rail {
+    border-left: 1px solid var(--line);
+    padding: 18px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+    overflow-y: auto;
+  }
+  .metric-label {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+  }
+  .metric-value {
+    font-size: 26px;
+    color: var(--lime);
+    font-weight: 500;
+    line-height: 1;
+  }
+  .metric-value small {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-left: 4px;
+  }
+  .divider { height: 1px; background: var(--line); }
+
+  .joints {
+    font-size: 10px;
+    color: var(--text-dim);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    line-height: 1.5;
+  }
+  .joints .row {
+    display: flex;
+    justify-content: space-between;
+  }
+  .joints .row span:first-child { color: var(--text); }
+
+  footer {
+    padding: 8px 20px;
+    border-top: 1px solid var(--line);
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 0.05em;
+    flex-shrink: 0;
+  }
+
+  @media (max-width: 640px) {
+    main { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
+    .rail { border-left: none; border-top: 1px solid var(--line); flex-direction: row; overflow-x: auto; gap: 24px; }
+    .divider { display: none; }
+    .joints { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">hand<span>·</span>tracker</div>
+    <div class="status"><span class="dot" id="dot"></span><span id="statusText">idle</span></div>
+  </header>
+
+  <main>
+    <div class="stage" id="stage">
+      <video id="video" playsinline></video>
+      <canvas id="canvas"></canvas>
+      <div class="stage-empty" id="empty">
+        <p>Akses kamera diperlukan untuk melacak gerakan tangan secara langsung, di browser kamu sendiri.</p>
+        <button id="start">Mulai kamera</button>
+      </div>
+    </div>
+
+    <div class="rail">
+      <div>
+        <div class="metric-label">Tangan terdeteksi</div>
+        <div class="metric-value" id="handCount">0</div>
+      </div>
+      <div class="divider"></div>
+      <div>
+        <div class="metric-label">FPS</div>
+        <div class="metric-value" id="fps">–</div>
+      </div>
+      <div class="divider"></div>
+      <div>
+        <div class="metric-label">Sisi</div>
+        <div class="metric-value" id="handedness" style="font-size:16px;">–</div>
+      </div>
+      <div class="divider"></div>
+      <div style="flex:1;">
+        <div class="metric-label">Ujung jari (x, y)</div>
+        <div class="joints" id="joints">
+          <div class="row"><span>Ibu jari</span><span>–</span></div>
+          <div class="row"><span>Telunjuk</span><span>–</span></div>
+          <div class="row"><span>Tengah</span><span>–</span></div>
+          <div class="row"><span>Manis</span><span>–</span></div>
+          <div class="row"><span>Kelingking</span><span>–</span></div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer>21 titik per tangan · diproses lokal di perangkatmu, tidak ada video yang dikirim ke server</footer>
+</div>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const startBtn = document.getElementById('start');
+const empty = document.getElementById('empty');
+const dot = document.getElementById('dot');
+const statusText = document.getElementById('statusText');
+const handCountEl = document.getElementById('handCount');
+const fpsEl = document.getElementById('fps');
+const handednessEl = document.getElementById('handedness');
+const jointsEl = document.getElementById('joints');
+
+const FINGER_TIPS = [4, 8, 12, 16, 20];
+const FINGER_NAMES = ['Ibu jari', 'Telunjuk', 'Tengah', 'Manis', 'Kelingking'];
+
+const CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],
+  [0,5],[5,6],[6,7],[7,8],
+  [0,9],[9,10],[10,11],[11,12],
+  [0,13],[13,14],[14,15],[15,16],
+  [0,17],[17,18],[18,19],[19,20],
+  [5,9],[9,13],[13,17]
+];
+
+let lastTime = performance.now();
+let frames = 0;
+
+function onResults(results) {
+  canvas.width = results.image.width;
+  canvas.height = results.image.height;
+  ctx.save();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+
+  const count = results.multiHandLandmarks ? results.multiHandLandmarks.length : 0;
+  handCountEl.textContent = count;
+
+  if (count > 0) {
+    const sides = results.multiHandedness.map(h => h.label === 'Left' ? 'Kiri' : 'Kanan');
+    handednessEl.textContent = sides.join(' / ');
+
+    results.multiHandLandmarks.forEach((landmarks) => {
+      ctx.strokeStyle = '#c6ff5e';
+      ctx.lineWidth = 2;
+      CONNECTIONS.forEach(([a, b]) => {
+        const p1 = landmarks[a], p2 = landmarks[b];
+        ctx.beginPath();
+        ctx.moveTo(p1.x * canvas.width, p1.y * canvas.height);
+        ctx.lineTo(p2.x * canvas.width, p2.y * canvas.height);
+        ctx.stroke();
+      });
+      landmarks.forEach((lm, i) => {
+        const isTip = FINGER_TIPS.includes(i);
+        ctx.beginPath();
+        ctx.arc(lm.x * canvas.width, lm.y * canvas.height, isTip ? 5 : 3, 0, 2 * Math.PI);
+        ctx.fillStyle = isTip ? '#c6ff5e' : '#e9ede8';
+        ctx.fill();
+      });
+    });
+
+    const first = results.multiHandLandmarks[0];
+    jointsEl.innerHTML = FINGER_TIPS.map((idx, i) => {
+      const lm = first[idx];
+      return `<div class="row"><span>${FINGER_NAMES[i]}</span><span>${lm.x.toFixed(2)}, ${lm.y.toFixed(2)}</span></div>`;
+    }).join('');
+  } else {
+    handednessEl.textContent = '–';
+    jointsEl.innerHTML = FINGER_NAMES.map(n =>
+      `<div class="row"><span>${n}</span><span>–</span></div>`
+    ).join('');
+  }
+
+  frames++;
+  const now = performance.now();
+  if (now - lastTime >= 1000) {
+    fpsEl.textContent = frames;
+    frames = 0;
+    lastTime = now;
+  }
+
+  ctx.restore();
+}
+
+const hands = new Hands({
+  locateFile: (file) => `https://cdnjs.cloudflare.com/ajax/libs/mediapipe/hands/${file}`
+});
+hands.setOptions({
+  maxNumHands: 2,
+  modelComplexity: 1,
+  minDetectionConfidence: 0.6,
+  minTrackingConfidence: 0.5
+});
+hands.onResults(onResults);
+
+let camera = null;
+
+startBtn.addEventListener('click', async () => {
+  statusText.textContent = 'meminta akses kamera…';
+  try {
+    camera = new Camera(video, {
+      onFrame: async () => { await hands.send({ image: video }); },
+      width: 960,
+      height: 720
+    });
+    await camera.start();
+    empty.style.display = 'none';
+    dot.classList.add('live');
+    statusText.textContent = 'live';
+  } catch (err) {
+    statusText.textContent = 'akses kamera ditolak';
+    console.error(err);
+  }
+});
+</script>
+</body>
+</html>
