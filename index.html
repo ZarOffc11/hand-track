@@ -4,8 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Hand Tracker</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/mediapipe/hands/hands.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/mediapipe/camera_utils/camera_utils.js"></script>
 <style>
   @font-face {
     font-family: 'JetBrains Mono';
@@ -231,7 +229,9 @@
   <footer>21 titik per tangan · diproses lokal di perangkatmu, tidak ada video yang dikirim ke server</footer>
 </div>
 
-<script>
+<script type="module">
+import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
@@ -258,22 +258,25 @@ const CONNECTIONS = [
 
 let lastTime = performance.now();
 let frames = 0;
+let handLandmarker = null;
+let running = false;
 
-function onResults(results) {
-  canvas.width = results.image.width;
-  canvas.height = results.image.height;
+function drawResults(result) {
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
   ctx.save();
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-  const count = results.multiHandLandmarks ? results.multiHandLandmarks.length : 0;
-  handCountEl.textContent = count;
+  const landmarksList = result.landmarks || [];
+  handCountEl.textContent = landmarksList.length;
 
-  if (count > 0) {
-    const sides = results.multiHandedness.map(h => h.label === 'Left' ? 'Kiri' : 'Kanan');
-    handednessEl.textContent = sides.join(' / ');
+  if (landmarksList.length > 0) {
+    const sides = (result.handednesses || []).map(h => h[0].categoryName === 'Left' ? 'Kanan' : 'Kiri');
+    // Catatan: kamera menghadap pengguna (mirror), jadi label MediaPipe dibalik agar sesuai perspektif pengguna
+    handednessEl.textContent = sides.join(' / ') || '–';
 
-    results.multiHandLandmarks.forEach((landmarks) => {
+    landmarksList.forEach((landmarks) => {
       ctx.strokeStyle = '#c6ff5e';
       ctx.lineWidth = 2;
       CONNECTIONS.forEach(([a, b]) => {
@@ -292,7 +295,7 @@ function onResults(results) {
       });
     });
 
-    const first = results.multiHandLandmarks[0];
+    const first = landmarksList[0];
     jointsEl.innerHTML = FINGER_TIPS.map((idx, i) => {
       const lm = first[idx];
       return `<div class="row"><span>${FINGER_NAMES[i]}</span><span>${lm.x.toFixed(2)}, ${lm.y.toFixed(2)}</span></div>`;
@@ -311,38 +314,63 @@ function onResults(results) {
     frames = 0;
     lastTime = now;
   }
-
   ctx.restore();
 }
 
-const hands = new Hands({
-  locateFile: (file) => `https://cdnjs.cloudflare.com/ajax/libs/mediapipe/hands/${file}`
-});
-hands.setOptions({
-  maxNumHands: 2,
-  modelComplexity: 1,
-  minDetectionConfidence: 0.6,
-  minTrackingConfidence: 0.5
-});
-hands.onResults(onResults);
+function renderLoop() {
+  if (!running) return;
+  if (video.readyState >= 2) {
+    const result = handLandmarker.detectForVideo(video, performance.now());
+    drawResults(result);
+  }
+  requestAnimationFrame(renderLoop);
+}
 
-let camera = null;
+async function initModel() {
+  statusText.textContent = 'memuat model…';
+  const vision = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+  );
+  handLandmarker = await HandLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+      delegate: "GPU"
+    },
+    runningMode: "VIDEO",
+    numHands: 2
+  });
+}
+
+async function startCamera() {
+  statusText.textContent = 'meminta akses kamera…';
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { width: 960, height: 720, facingMode: 'user' },
+    audio: false
+  });
+  video.srcObject = stream;
+  await video.play();
+}
 
 startBtn.addEventListener('click', async () => {
-  statusText.textContent = 'meminta akses kamera…';
+  startBtn.disabled = true;
   try {
-    camera = new Camera(video, {
-      onFrame: async () => { await hands.send({ image: video }); },
-      width: 960,
-      height: 720
-    });
-    await camera.start();
+    if (!handLandmarker) await initModel();
+    await startCamera();
     empty.style.display = 'none';
     dot.classList.add('live');
     statusText.textContent = 'live';
+    running = true;
+    requestAnimationFrame(renderLoop);
   } catch (err) {
-    statusText.textContent = 'akses kamera ditolak';
     console.error(err);
+    startBtn.disabled = false;
+    if (err.name === 'NotAllowedError') {
+      statusText.textContent = 'akses kamera ditolak';
+    } else if (err.name === 'NotFoundError') {
+      statusText.textContent = 'kamera tidak ditemukan';
+    } else {
+      statusText.textContent = 'gagal memuat: ' + err.message;
+    }
   }
 });
 </script>
