@@ -163,6 +163,32 @@
   }
   .joints .row span:first-child { color: var(--text); }
 
+  .fx-picker {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .fx-btn {
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--text-dim);
+    font-family: inherit;
+    font-size: 10px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: 6px 9px;
+    border-radius: 2px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .fx-btn:hover { border-color: var(--lime-dim); color: var(--text); }
+  .fx-btn.active {
+    background: var(--lime);
+    border-color: var(--lime);
+    color: #0b0d0c;
+    font-weight: 700;
+  }
+
   footer {
     padding: 8px 20px;
     border-top: 1px solid var(--line);
@@ -218,6 +244,17 @@
         <div class="metric-value" id="gesture" style="font-size:15px; min-height:1.2em;">–</div>
       </div>
       <div class="divider"></div>
+      <div>
+        <div class="metric-label">Efek jendela (2 tangan)</div>
+        <div class="fx-picker" id="fxPicker">
+          <button class="fx-btn active" data-fx="portal">Portal</button>
+          <button class="fx-btn" data-fx="starfield">Starfield</button>
+          <button class="fx-btn" data-fx="thermal">Termal</button>
+          <button class="fx-btn" data-fx="glitch">Glitch</button>
+          <button class="fx-btn" data-fx="kaleido">Kaleido</button>
+        </div>
+      </div>
+      <div class="divider"></div>
       <div style="flex:1;">
         <div class="metric-label">Ujung jari (x, y)</div>
         <div class="joints" id="joints">
@@ -231,7 +268,7 @@
     </div>
   </main>
 
-  <footer>Gesture: telapak ke atas · pinch · kepal · peace ✌️ — diproses lokal, tidak ada video terkirim ke server</footer>
+  <footer>Rentangkan jempol+telunjuk kedua tangan untuk buka jendela efek · pilih efeknya di panel kanan</footer>
 </div>
 
 <script type="module">
@@ -485,6 +522,225 @@ function drawConfetti(dt) {
 }
 // ===================== END GESTURE ENGINE =====================
 
+// ===================== TWO-HAND WINDOW ENGINE =====================
+// Jendela dibentuk dari bounding box 4 titik: jempol+telunjuk tangan kiri
+// dan jempol+telunjuk tangan kanan. Rentangkan kedua tangan (bentuk L
+// dengan jempol & telunjuk) untuk membuka jendela efek.
+
+let currentFx = 'portal';
+document.getElementById('fxPicker').addEventListener('click', (e) => {
+  const btn = e.target.closest('.fx-btn');
+  if (!btn) return;
+  document.querySelectorAll('.fx-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  currentFx = btn.dataset.fx;
+});
+
+const win = { x:0, y:0, w:0, h:0, alpha:0, cx:0, cy:0 };
+const stars = Array.from({length: 90}, () => spawnStar());
+function spawnStar() {
+  return { x: (Math.random()-0.5)*2, y: (Math.random()-0.5)*2, z: Math.random() };
+}
+
+function updateWindow(landmarksList, dt) {
+  const active = landmarksList.length >= 2;
+  let targetAlpha = 0;
+
+  if (active) {
+    const pts = [
+      landmarksList[0][4], landmarksList[0][8],
+      landmarksList[1][4], landmarksList[1][8]
+    ].map(p => ({ x: p.x * canvas.width, y: p.y * canvas.height }));
+
+    const minX = Math.min(...pts.map(p=>p.x));
+    const maxX = Math.max(...pts.map(p=>p.x));
+    const minY = Math.min(...pts.map(p=>p.y));
+    const maxY = Math.max(...pts.map(p=>p.y));
+    const w = maxX - minX, h = maxY - minY;
+
+    if (w > 60 && h > 60) {
+      targetAlpha = 1;
+      const t = 0.18;
+      win.x = lerp(win.x || minX, minX, t);
+      win.y = lerp(win.y || minY, minY, t);
+      win.w = lerp(win.w || w, w, t);
+      win.h = lerp(win.h || h, h, t);
+    }
+    win._pts = pts;
+  }
+
+  win.alpha = lerp(win.alpha, targetAlpha, 0.12);
+  win.cx = win.x + win.w/2;
+  win.cy = win.y + win.h/2;
+}
+
+function drawWindow(dt, landmarksList) {
+  // bracket kecil di titik jempol & telunjuk tiap tangan (gaya viewfinder)
+  if (landmarksList.length >= 2 && win._pts) {
+    win._pts.forEach((p, i) => {
+      ctx.save();
+      ctx.strokeStyle = '#c6ff5e';
+      ctx.fillStyle = '#c6ff5e';
+      ctx.lineWidth = 1.5;
+      ctx.globalAlpha = 0.5 + 0.5 * win.alpha;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 7, 0, Math.PI*2);
+      ctx.stroke();
+      ctx.restore();
+    });
+  }
+
+  if (win.alpha < 0.02 || win.w < 10) return;
+
+  ctx.save();
+  ctx.globalAlpha = win.alpha;
+  const r = 14;
+  roundRectPath(win.x, win.y, win.w, win.h, r);
+  ctx.clip();
+
+  switch (currentFx) {
+    case 'portal': drawPortalFx(dt); break;
+    case 'starfield': drawStarfieldFx(dt); break;
+    case 'thermal': drawThermalFx(); break;
+    case 'glitch': drawGlitchFx(dt); break;
+    case 'kaleido': drawKaleidoFx(dt); break;
+  }
+  ctx.restore();
+
+  // border jendela
+  ctx.save();
+  ctx.globalAlpha = win.alpha;
+  roundRectPath(win.x, win.y, win.w, win.h, r);
+  ctx.strokeStyle = '#c6ff5e';
+  ctx.lineWidth = 2;
+  ctx.shadowColor = '#c6ff5e';
+  ctx.shadowBlur = 12;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function roundRectPath(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.arcTo(x+w, y, x+w, y+h, r);
+  ctx.arcTo(x+w, y+h, x, y+h, r);
+  ctx.arcTo(x, y+h, x, y, r);
+  ctx.arcTo(x, y, x+w, y, r);
+  ctx.closePath();
+}
+
+let portalAngle = 0;
+function drawPortalFx(dt) {
+  portalAngle += dt * 0.0015;
+  ctx.fillStyle = '#050b08';
+  ctx.fillRect(win.x, win.y, win.w, win.h);
+  const rings = 5;
+  for (let i = 0; i < rings; i++) {
+    const p = (i / rings + portalAngle * 0.15) % 1;
+    const rad = p * Math.min(win.w, win.h) * 0.55;
+    ctx.save();
+    ctx.globalAlpha = (1 - p) * 0.8;
+    ctx.strokeStyle = i % 2 === 0 ? '#c6ff5e' : '#e9ede8';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(win.cx, win.cy, rad, 0, Math.PI*2);
+    ctx.stroke();
+    ctx.restore();
+  }
+  for (let i = 0; i < 14; i++) {
+    const a = portalAngle * 2 + (i / 14) * Math.PI * 2;
+    const r = Math.min(win.w, win.h) * (0.15 + 0.35 * ((Math.sin(a*2)+1)/2));
+    const px = win.cx + Math.cos(a) * r;
+    const py = win.cy + Math.sin(a) * r;
+    ctx.save();
+    ctx.globalAlpha = 0.7;
+    ctx.fillStyle = '#c6ff5e';
+    ctx.beginPath();
+    ctx.arc(px, py, 2, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawStarfieldFx(dt) {
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(win.x, win.y, win.w, win.h);
+  const speed = dt * 0.0016;
+  stars.forEach(s => {
+    const prevZ = s.z;
+    s.z -= speed;
+    if (s.z <= 0.02) Object.assign(s, spawnStar(), { z: 1 });
+    const sx = win.cx + (s.x / s.z) * win.w * 0.5;
+    const sy = win.cy + (s.y / s.z) * win.h * 0.5;
+    const psx = win.cx + (s.x / prevZ) * win.w * 0.5;
+    const psy = win.cy + (s.y / prevZ) * win.h * 0.5;
+    const size = (1 - s.z) * 2.2;
+    ctx.save();
+    ctx.globalAlpha = 1 - s.z;
+    ctx.strokeStyle = '#c6ff5e';
+    ctx.lineWidth = size;
+    ctx.beginPath();
+    ctx.moveTo(psx, psy);
+    ctx.lineTo(sx, sy);
+    ctx.stroke();
+    ctx.restore();
+  });
+}
+
+function drawThermalFx() {
+  ctx.filter = 'grayscale(1) contrast(1.4) brightness(1.15) sepia(1) hue-rotate(190deg) saturate(6)';
+  ctx.drawImage(video, win.x, win.y, win.w, win.h, win.x, win.y, win.w, win.h);
+  ctx.filter = 'none';
+}
+
+let glitchTimer = 0;
+function drawGlitchFx(dt) {
+  ctx.drawImage(video, win.x, win.y, win.w, win.h, win.x, win.y, win.w, win.h);
+  glitchTimer += dt;
+  const sliceH = 10;
+  for (let y = win.y; y < win.y + win.h; y += sliceH) {
+    if (Math.random() < 0.35) {
+      const off = (Math.random() - 0.5) * 30;
+      const h = Math.min(sliceH, win.y + win.h - y);
+      ctx.drawImage(video, win.x, y, win.w, h, win.x + off, y, win.w, h);
+    }
+  }
+  ctx.save();
+  ctx.globalAlpha = 0.15;
+  ctx.fillStyle = '#c6ff5e';
+  for (let y = win.y; y < win.y + win.h; y += 4) {
+    ctx.fillRect(win.x, y, win.w, 1);
+  }
+  ctx.restore();
+  if (Math.sin(glitchTimer * 0.02) > 0.93) {
+    ctx.save();
+    ctx.globalAlpha = 0.25;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(win.x, win.y, win.w, win.h);
+    ctx.restore();
+  }
+}
+
+let kaleidoAngle = 0;
+function drawKaleidoFx(dt) {
+  kaleidoAngle += dt * 0.0008;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(win.x, win.y, win.w, win.h);
+  const segments = 8;
+  const sample = Math.min(win.w, win.h) * 0.5;
+  const sx = Math.max(0, Math.min(canvas.width - sample, win.cx - sample/2));
+  const sy = Math.max(0, Math.min(canvas.height - sample, win.cy - sample/2));
+  for (let i = 0; i < segments; i++) {
+    ctx.save();
+    ctx.translate(win.cx, win.cy);
+    ctx.rotate(kaleidoAngle + (i / segments) * Math.PI * 2);
+    if (i % 2 === 1) ctx.scale(1, -1);
+    ctx.drawImage(video, sx, sy, sample, sample, -sample/2, -sample, sample, sample);
+    ctx.restore();
+  }
+}
+// ===================== END TWO-HAND WINDOW ENGINE =====================
+
 function drawResults(result, dt) {
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
@@ -497,6 +753,7 @@ function drawResults(result, dt) {
   handCountEl.textContent = landmarksList.length;
 
   updateGesture(landmarksList[0], worldList[0], dt);
+  updateWindow(landmarksList, dt);
   drawDiamond(landmarksList[0]);
   drawRings(dt);
   drawConfetti(dt);
@@ -517,11 +774,17 @@ function drawResults(result, dt) {
         ctx.stroke();
       });
       landmarks.forEach((lm, i) => {
+        const isPinch = i === 4 || i === 8;
         const isTip = FINGER_TIPS.includes(i);
         ctx.beginPath();
-        ctx.arc(lm.x * canvas.width, lm.y * canvas.height, isTip ? 5 : 3, 0, 2 * Math.PI);
-        ctx.fillStyle = isTip ? '#c6ff5e' : '#e9ede8';
+        ctx.arc(lm.x * canvas.width, lm.y * canvas.height, isPinch ? 7 : (isTip ? 5 : 3), 0, 2 * Math.PI);
+        ctx.fillStyle = isPinch ? '#ffffff' : (isTip ? '#c6ff5e' : '#e9ede8');
+        if (isPinch) {
+          ctx.shadowColor = '#c6ff5e';
+          ctx.shadowBlur = 10;
+        }
         ctx.fill();
+        ctx.shadowBlur = 0;
       });
     });
 
@@ -536,6 +799,8 @@ function drawResults(result, dt) {
       `<div class="row"><span>${n}</span><span>–</span></div>`
     ).join('');
   }
+
+  drawWindow(dt, landmarksList);
 
   frames++;
   const now = performance.now();
